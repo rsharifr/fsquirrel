@@ -1,0 +1,11 @@
+1. To calibrate a drive/motor use GUI.
+
+
+2. To save the configuration file to reuse it later use this code:
+    odrivetool backup-config odrv1_config.json
+Then change the settings as needed.
+
+3. To load a configuration file use this code:
+    odrivetool restore-config .\odrv1_config.json
+
+    
