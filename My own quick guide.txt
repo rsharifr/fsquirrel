@@ -2,10 +2,12 @@
 
 
 2. To save the configuration file to reuse it later use this code:
-    odrivetool backup-config odrv1_config.json
+    odrivetool backup-config ODrive_config\odrv1_config.json
 Then change the settings as needed.
 
 3. To load a configuration file use this code:
-    odrivetool restore-config .\odrv1_config.json
+    odrivetool restore-config .\ODrive_config\odrv1_config.json
+
+4. For Teensy serial monitor in PlatformIO: Start the monitor first with 'pio device monitor', then unplug and replug the Teensy to establish the connection.
 
     

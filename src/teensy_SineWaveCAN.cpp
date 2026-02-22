@@ -1,4 +1,3 @@
-
 #include <Arduino.h>
 #include "ODriveCAN.h"
 
@@ -22,6 +21,11 @@
 #include <FlexCAN_T4.h>
 #include "ODriveFlexCAN.hpp"
 struct ODriveStatus; // hack to prevent teensy compile error
+
+// Function prototypes
+void onHeartbeat(Heartbeat_msg_t& msg, void* user_data);
+void onFeedback(Get_Encoder_Estimates_msg_t& msg, void* user_data);
+void onCanMessage(const CanMsg& msg);
 
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_32> can_intf;
 
@@ -87,9 +91,10 @@ Get_Encoder_Estimates_msg_t feedback4;
 void setup() {
   Serial.begin(115200);
 
-  // Wait for up to 3 seconds for the serial port to be opened on the PC side.
+  // Wait for up to 10 seconds for the serial port to be opened on the PC side.
   // If no PC connects, continue anyway.
-  for (int i = 0; i < 30 && !Serial; ++i) {
+  unsigned long startTime = millis();
+  while (!Serial && millis() - startTime < 10000) {
     delay(100);
   }
   delay(200);
@@ -178,59 +183,62 @@ void setup() {
 
 
   Serial.println("Enabling closed loop control...");
-  while (odrv1_user_data.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
-    odrv1.clearErrors();
-    delay(10);
-    odrv1.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
+  for (int odrv_idx = 0; odrv_idx < 4; ++odrv_idx) {
+    ODriveCAN* odrv = odrives[odrv_idx];
+    ODriveUserData* user_data = nullptr;
+    if (odrv_idx == 0) user_data = &odrv1_user_data;
+    else if (odrv_idx == 1) user_data = &odrv2_user_data;
+    else if (odrv_idx == 2) user_data = &odrv3_user_data;
+    else if (odrv_idx == 3) user_data = &odrv4_user_data;
 
-    for (int i = 0; i < 15; ++i) {
+    int attempts = 0;
+    const int max_attempts = 100;  // Limit attempts to avoid infinite loop
+    bool success = false;
+
+    while (attempts < max_attempts) {
+      // Clear errors and set state
+      odrv->clearErrors();
       delay(10);
-      pumpEvents(can_intf);
+      odrv->setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
+
+      // Pump events frequently to process incoming heartbeats
+      for (int i = 0; i < 20; ++i) {  // Increased pumping
+        pumpEvents(can_intf);
+        delay(5);  // Shorter delay for more frequent checks
+      }
+
+      // Check if heartbeat indicates closed loop
+      if (user_data->received_heartbeat && 
+          user_data->last_heartbeat.Axis_State == ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
+        Serial.print("ODrive ");
+        Serial.print(odrv_idx + 1);
+        Serial.println(" is running");
+        success = true;
+        break;
+      }
+
+      attempts++;
+    }
+
+    if (!success) {
+      Serial.print("Last status for ODrive ");
+      Serial.print(odrv_idx + 1);
+      Serial.print(": Heartbeat received: ");
+      Serial.print(user_data->received_heartbeat ? "yes" : "no");
+      if (user_data->received_heartbeat) {
+        Serial.print(", Axis State: ");
+        Serial.println(user_data->last_heartbeat.Axis_State);
+      } else {
+        Serial.println();
+      }
+      Serial.print("Failed to enable closed loop for ODrive ");
+      Serial.print(odrv_idx + 1);
+      Serial.println(" after max attempts");
     }
   }
-  Serial.println("ODrive 1 is running");
 
 
-while (odrv2_user_data.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
-    odrv2.clearErrors();
-    delay(10);
-    odrv2.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
-
-    for (int i = 0; i < 15; ++i) {
-      delay(10);
-      pumpEvents(can_intf);
-    }
-  }
-  Serial.println("ODrive 2 is running");
-
-
-while (odrv3_user_data.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
-    odrv3.clearErrors();
-    delay(10);
-    odrv3.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
-
-    for (int i = 0; i < 15; ++i) {
-      delay(10);
-      pumpEvents(can_intf);
-    }
-  }
-  Serial.println("ODrive 3 is running");
-
-
-while (odrv4_user_data.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
-    odrv4.clearErrors();
-    delay(10);
-    odrv4.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
-
-    for (int i = 0; i < 15; ++i) {
-      delay(10);
-      pumpEvents(can_intf);
-    }
-  }
-  Serial.println("ODrive 4 is running");
-
-
-  t0 = 0.001 * millis();
+  t0 = micros() * 1e-6;
 
 
   feedback1 = odrv1_user_data.last_feedback;
@@ -241,6 +249,36 @@ while (odrv4_user_data.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_
 } // end of setup()
 
 void loop() {
+  static unsigned long lastLoopStart = 0;
+  static unsigned long sumIntervals = 0;
+  static unsigned long sumSquares = 0;
+  static int count = 0;
+  static unsigned long lastReportTime = 0;
+  
+  unsigned long now = micros();
+  if (lastLoopStart != 0) {
+    unsigned long loopInterval = now - lastLoopStart;
+    sumIntervals += loopInterval;
+    sumSquares += (unsigned long)loopInterval * loopInterval;
+    count++;
+  }
+  lastLoopStart = now;
+ 
+  // Report stats every 100 ms
+  if (now - lastReportTime >= 100000 && count > 0) {  // 100000 us = 100 ms
+    float mean = (float)sumIntervals / count;
+    float variance = ((float)sumSquares / count) - (mean * mean);
+    float std = sqrt(variance);
+    Serial.print("Mean loop interval: ");
+    Serial.print(mean);
+    Serial.print(" us, Std: ");
+    Serial.print(std);
+    Serial.println(" us");
+    sumIntervals = 0;
+    sumSquares = 0;
+    count = 0;
+    lastReportTime = now;
+  }
  
   pumpEvents(can_intf); // This is required on some platforms to handle incoming feedback CAN messages
                         // Note that on MCP2515-based platforms, this will delay for a fixed 10ms.
@@ -250,7 +288,7 @@ void loop() {
 
   float SINE_PERIOD = 2.0f; // Period of the position command sine wave in seconds
 
-  float t = 0.001 * millis() - t0;
+  float t = (now * 1e-6) - t0;
   
   float phase = t * (TWO_PI / SINE_PERIOD);
 

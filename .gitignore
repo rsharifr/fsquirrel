@@ -205,3 +205,20 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+*.hex
+*.elf
+*.bin
+*.map
+
+# Teensy
+*.ino.hex
+*.ino.elf
+
+# Virtual environments (additional patterns)
+venv_OdriveTool/
