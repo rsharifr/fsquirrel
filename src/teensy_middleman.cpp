@@ -88,16 +88,14 @@ Get_Encoder_Estimates_msg_t feedback2;
 Get_Encoder_Estimates_msg_t feedback3;
 Get_Encoder_Estimates_msg_t feedback4;
 
+
+
+
 // SETUP()
-//
-// S     EEE   TTT   U   U PPP
-// S    E   E   T   U   U P  P
-// S    EEEE    T   U   U PPP
-// S    E   E   T   U   U P
-// SSS   EEE    T    UUU  P
+
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(500000);
 
   // Wait for up to 10 seconds for the serial port to be opened on the PC side.
   // If no PC connects, continue anyway.
@@ -159,30 +157,21 @@ void setup() {
   Get_Bus_Voltage_Current_msg_t vbus;
   bool vbusErrorFlag = false;
 
-  if (!odrv1.request(vbus, 1000)) {
-    Serial.println("vbus on ODrive 1 request failed!");
-    vbusErrorFlag = true;
+  for (int i = 0; i < 4; i++) {
+    ODriveCAN* odrv = odrives[i];
+    if (!odrv->request(vbus, 1000)) {
+      Serial.print("vbus on ODrive ");
+      Serial.print(i + 1);
+      Serial.println(" request failed!");
+      vbusErrorFlag = true;
+    }
+    Serial.print("ODrive ");
+    Serial.print(i + 1);
+    Serial.print(": DC voltage [V]: ");
+    Serial.print(vbus.Bus_Voltage);
+    Serial.print(" | DC current [A]: ");
+    Serial.println(vbus.Bus_Current);
   }
-  Serial.print("ODrive 1: DC voltage [V]: "); Serial.print(vbus.Bus_Voltage); Serial.print(" | DC current [A]: "); Serial.println(vbus.Bus_Current);
-
-  if (!odrv2.request(vbus, 1000)) {
-    Serial.println("vbus on ODrive 1 request failed!");
-    vbusErrorFlag = true;
-  }
-  Serial.print("ODrive 2: DC voltage [V]: "); Serial.print(vbus.Bus_Voltage); Serial.print(" | DC current [A]: "); Serial.println(vbus.Bus_Current);
-
-  if (!odrv3.request(vbus, 1000)) {
-    Serial.println("vbus on ODrive 1 request failed!");
-    vbusErrorFlag = true;
-  }
-  Serial.print("ODrive 3: DC voltage [V]: "); Serial.print(vbus.Bus_Voltage); Serial.print(" | DC current [A]: "); Serial.println(vbus.Bus_Current);
-
-  if (!odrv4.request(vbus, 1000)) {
-    Serial.println("vbus on ODrive 1 request failed!");
-    vbusErrorFlag = true;
-  }
-  Serial.print("ODrive 4: DC voltage [V]: "); Serial.print(vbus.Bus_Voltage); Serial.print(" | DC current [A]: "); Serial.println(vbus.Bus_Current);
-
   // If there is an error with any of the bus voltages waits forever. 
   if (vbusErrorFlag) {
     Serial.println("Bus voltage issues");
@@ -281,8 +270,8 @@ void loop() {
   }
   lastLoopStart = now;
  
-  // Report stats every 100 ms
-  if (now - lastReportTime >= 100000 && count > 0) {  // 100000 us = 100 ms
+  // Report stats every 2 ms
+  if (now - lastReportTime >= 10*1000 && count > 0) {  // 2000 us = 2 ms
     float mean = (float)sumIntervals / count;
     float variance = ((float)sumSquares / count) - (mean * mean);
     float std = sqrt(variance);
@@ -309,28 +298,148 @@ void loop() {
                         // This has been found to reduce the number of dropped messages, however it can be removed
                         // for applications requiring loop times over 100Hz.
 
-  float SINE_PERIOD = 2.0f; // Period of the position command sine wave in seconds
-
-  float t = (now * 1e-6) - t0;
-  
-  float phase = t * (TWO_PI / SINE_PERIOD);
 
 
+    // Read commands from serial in format "P1:100, V1:120, T1:50, ..."
+    static float pos1 = NAN, pos2 = NAN, pos3 = NAN, pos4 = NAN;
+    static float vel1 = NAN, vel2 = NAN, vel3 = NAN, vel4 = NAN;
+    static float tor1 = NAN, tor2 = NAN, tor3 = NAN, tor4 = NAN;
 
-  float rampDuration = 2.0f;
-  if (t<rampDuration){
-    odrv1.setPosition(feedback1.Pos_Estimate*(rampDuration-t)/rampDuration);
-    odrv2.setPosition(feedback2.Pos_Estimate*(rampDuration-t)/rampDuration);
-    odrv3.setPosition(feedback3.Pos_Estimate*(rampDuration-t)/rampDuration);
-    odrv4.setPosition(feedback4.Pos_Estimate*(rampDuration-t)/rampDuration);
-  }
-  else{
-    odrv1.setPosition(0*sin(phase)); // second argument feedforward velocity is optional
-    odrv2.setPosition(1*sin(phase)); // second argument feedforward velocity is optional
-    odrv3.setPosition(1*sin(phase)); // second argument feedforward velocity is optional
-    odrv4.setPosition(0*sin(phase)); // second argument feedforward velocity is optional
-  }
+    if (Serial.available()) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      Serial.print("Echo input command from teensy: ");
+      Serial.println(input);
 
+      // Initialize all commands to NAN for this iteration
+      pos1 = NAN; pos2 = NAN; pos3 = NAN; pos4 = NAN;
+      vel1 = NAN; vel2 = NAN; vel3 = NAN; vel4 = NAN;
+      tor1 = NAN; tor2 = NAN; tor3 = NAN; tor4 = NAN;
+      
+      // Parse the input string in format "P1:100, V2:120, T3:50, ..."
+      int idx = 0;
+      while (idx < (int)input.length()) {
+        // Skip whitespace
+        while (idx < (int)input.length() && (input[idx] == ' ' || input[idx] == ',')) {
+          idx++;
+        }
+        
+        if (idx >= (int)input.length()) break;
+        
+        // Extract command type (P, V, or T)
+        char cmdType = input[idx];
+        idx++;
+        
+        // Extract axis number (1-4)
+        if (idx < (int)input.length() && input[idx] >= '1' && input[idx] <= '4') {
+          int axis = input[idx] - '0';
+          idx++;
+          
+          // Expect ':'
+          if (idx < (int)input.length() && input[idx] == ':') {
+            idx++;
+            
+            // Extract the value
+            int endPos = input.indexOf(',', idx);
+            if (endPos == -1) endPos = input.length();
+            
+            String valueStr = input.substring(idx, endPos);
+            valueStr.trim();
+            float value = valueStr.toFloat();
+            
+            // Store the command based on type and axis
+            if (cmdType == 'P' || cmdType == 'p') {
+              if (axis == 1) pos1 = value;
+              else if (axis == 2) pos2 = value;
+              else if (axis == 3) pos3 = value;
+              else if (axis == 4) pos4 = value;
+            } else if (cmdType == 'V' || cmdType == 'v') {
+              if (axis == 1) vel1 = value;
+              else if (axis == 2) vel2 = value;
+              else if (axis == 3) vel3 = value;
+              else if (axis == 4) vel4 = value;
+            } else if (cmdType == 'T' || cmdType == 't') {
+              if (axis == 1) tor1 = value;
+              else if (axis == 2) tor2 = value;
+              else if (axis == 3) tor3 = value;
+              else if (axis == 4) tor4 = value;
+            }
+            
+            idx = endPos;
+          } else {
+            idx++; // Skip invalid character
+          }
+        } else {
+          idx++; // Skip invalid character
+        }
+      }
+    }
+
+    // Send commands to ODrives
+    // If position is specified, use setPosition; otherwise if velocity is specified, use setVelocity; otherwise use torque
+    if (!isnan(pos1)) { // first priority is position control
+      if (!isnan(vel1)) {
+        odrv1.setPosition(pos1, vel1); //optinal use velocity as feedforward command
+      } else {
+        odrv1.setPosition(pos1);
+      }
+    } else if (!isnan(vel1)) { // second priority is velocity control
+      if (!isnan(tor1)) {
+        odrv1.setVelocity(vel1, tor1); // optional use torque as feedforward command
+      } else {
+        odrv1.setVelocity(vel1);
+      }
+    } else if (!isnan(tor1)) { // Third priority is torque control
+      odrv1.setTorque(tor1);  
+    }
+
+    if (!isnan(pos2)) { // first priority is position control
+      if (!isnan(vel2)) {
+        odrv2.setPosition(pos2, vel2); //optinal use velocity as feedforward command
+      } else {
+        odrv2.setPosition(pos2);
+      }
+    } else if (!isnan(vel2)) { // second priority is velocity control
+      if (!isnan(tor2)) {
+        odrv2.setVelocity(vel2, tor2); // optional use torque as feedforward command
+      } else {
+        odrv2.setVelocity(vel2);
+      }
+    } else if (!isnan(tor2)) { // Third priority is torque control
+      odrv2.setTorque(tor2);  
+    }
+
+    if (!isnan(pos3)) { // first priority is position control
+      if (!isnan(vel3)) {
+        odrv3.setPosition(pos3, vel3); //optinal use velocity as feedforward command
+      } else {
+        odrv3.setPosition(pos3);
+      }
+    } else if (!isnan(vel3)) { // second priority is velocity control
+      if (!isnan(tor3)) {
+        odrv3.setVelocity(vel3, tor3); // optional use torque as feedforward command
+      } else {
+        odrv3.setVelocity(vel3);
+      }
+    } else if (!isnan(tor3)) { // Third priority is torque control
+      odrv3.setTorque(tor3);  
+    }
+
+    if (!isnan(pos4)) { // first priority is position control
+      if (!isnan(vel4)) {
+        odrv4.setPosition(pos4, vel4); //optinal use velocity as feedforward command
+      } else {
+        odrv4.setPosition(pos4);
+      }
+    } else if (!isnan(vel4)) { // second priority is velocity control
+      if (!isnan(tor4)) {
+        odrv4.setVelocity(vel4, tor4); // optional use torque as feedforward command
+      } else {
+        odrv4.setVelocity(vel4);
+      }
+    } else if (!isnan(tor4)) { // Third priority is torque control
+      odrv4.setTorque(tor4);  
+    }
 
   if (odrv1_user_data.received_feedback) {
     feedback1 = odrv1_user_data.last_feedback;
